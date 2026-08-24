@@ -1,4 +1,6 @@
 import os
+import threading
+import requests
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
@@ -8,6 +10,7 @@ app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 
 CHANNEL_ID = "C0819J5AFPS"
 USERGROUP_ID ="S08AXRM7BGE"
+CANVAS_ID ="F0BS3TXKSSE"
 
 def add_to_usergroup(client, user_id):
     current = client.usergroups_users_list(usergroup=USERGROUP_ID)
@@ -80,6 +83,50 @@ def send_emojis(ack, body, client):
         thread_ts=ts,
         text=":red-pikmin:"
     )
+
+def fetch_canvas_markdown(client):
+    info = client.files_info(file=CANVAS_ID)
+    if not info["ok"]:
+        print(f"files_info failed {info}")
+        return None
+
+    download_url = info["file"]["url_private_download"]
+    bot_token = os.getenv("SLACK_BOT_TOKEN")
+
+    resp = requests.et(download_url, headers={"Authorization": f"Bearer {bot_token}"})
+    if resp.status_code != 200:
+        print(f"[canvas download failed] status={resp.status_code} body={resp.text[:300]}")
+        return None
+    return resp.text
+
+def extract_bullets(markdown_text, heading_text):
+    lines = markdown_text.split("\n")
+    bullets = []
+    in_section = False
+
+    for line in lines:
+        stripped = line.strip()
+        clean_heading = stripped.lstrip("#").strip().lower()
+
+        if not in_section:
+            if clean_heading == heading_text.lower():
+                in_section = True
+            continue
+
+        if stripped == "":
+            continue
+
+        if stripped.startswitch("*") or stripped.startswitch("-"):
+            item = stripped.lstrip("*-").strip()
+
+            if item.startswitch("[") and "]" in item:
+                item = item.split("]", 1)[1].strip()
+            bullets.append(item)
+        else:
+            break
+
+    return bullets
+            
 
 if __name__ == "__main__":
     print("bot is running!")
