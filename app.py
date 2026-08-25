@@ -150,7 +150,7 @@ def post_todo_summary(client):
         return
 
     bullet_lines = "\n".join(f"\u2022 {b}" for b in bullets)
-    text = f"*today's to-dos:*\n{bullet_lines}"
+    text = f"wakey wakey <@U07SX29CECA>\n*today's to-dos:*\n{bullet_lines}"
 
     client.chat_postMessage(channel=CHANNEL_ID, text=text)
     print(f"posted {len(bullets)} to-do bullets")
