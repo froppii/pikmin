@@ -1,8 +1,10 @@
 import os
+import json
 import threading
 import requests
 import time
 import datetime
+from bs4 import BeautifulSoup
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from dotenv import load_dotenv
@@ -17,6 +19,11 @@ TODO_HEADING = "to do(doing/urgent)"
 
 POST_HOUR = 10
 POST_MINUTE = 0
+
+NIGHT_HOUR = 0
+NIGHT_MINUTE = 0
+
+STREAK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "streak_data.json")
 
 def add_to_usergroup(client, user_id):
     current = client.usergroups_users_list(usergroup=USERGROUP_ID)
@@ -87,10 +94,10 @@ def send_emojis(ack, body, client):
     client.chat_postMessage(
         channel=channel,
         thread_ts=ts,
-        text=":red-pikmin:"
+        text=":nodnod:"
     )
 
-def fetch_canvas_markdown(client):
+def fetch_canvas_html(client):
     info = client.files_info(file=CANVAS_ID)
     if not info["ok"]:
         print(f"files_info failed {info}")
@@ -105,13 +112,11 @@ def fetch_canvas_markdown(client):
         return None
     return resp.text
 
-from bs4 import BeautifulSoup
-
-def extract_bullets(html_text, heading_text):
+def extract_checklists(html_text, heading_text):
     soup = BeautifulSoup(html_text, "html.parser")
     container = soup.find(class_= "quip-canvas-content") or soup
 
-    bullets = []
+    items = []
     in_section = False
 
     for child in container.children:
@@ -129,21 +134,19 @@ def extract_bullets(html_text, heading_text):
 
         if in_section and name == "div":
             for li in child.find_all("li"):
-                bullets.append(li.get_text(strip=True))
+                classes = li.get("class") or []
+                checked = "checked" in classes
+                items.append((li.get_text(strip=True), checked))
 
-    if not bullets:
-        print("raw html")
-        print(html_text[:2000])
-        print("debug end")
-
-    return bullets
+    return items
 
 def post_todo_summary(client):
-    markdown_text = fetch_canvas_markdown(client)
-    if markdown_text is None:
+    html_text = fetch_canvas_html(client)
+    if html_text is None:
         return
 
-    bullets = extract_bullets(markdown_text, TODO_HEADING)
+    items = extract_checklists(html_text, TODO_HEADING)
+    bullets = [text for text, checked in items]
 
     if not bullets:
         print("the list is empty! :D")
@@ -155,22 +158,73 @@ def post_todo_summary(client):
     client.chat_postMessage(channel=CHANNEL_ID, text=text)
     print(f"posted {len(bullets)} to-do bullets")
 
-def seconds_until_next_post():
+
+def load_streak_data():
+    if not os.path.exists(STREAK_FILE):
+        return {"streak": 0, "last_date": None}
+    with open(STREAK_FILE) as f:
+        return json.load(f)
+
+def save_streak_data(data):
+    with open(STREAK_FILE, "w") as f:
+        json.dump(data, f)
+
+def post_night_summary(client):
+    data = load_streak_data()
+    today_streak = datetime.date.today().isoformat()
+
+    if data.get("last_date") == today_streak:
+        print("summary already posted today, skipping")
+        return
+
+    html_text = fetch_canvas_html(client)
+    if html_text is None:
+        return
+
+    items = extract_checklists(html_text, TODO_HEADING)
+    checked_items = [text for text, checked in items if checked]
+
+    if checked_items:
+        new_streak = data.get("streak", 0) + 1
+        bullet_lines = "\n".join(f"\u2022 {t}" for t in checked_items)
+        text = (
+            f"yippie!!! you did a couple of things today!!\n\n"
+            f"{bullet_lines}\n\n"
+            f"*streak: {new_streak} day{'s' if new_streak != 1 else ''}*"
+        )
+    else:
+        new_streak = 0
+        text = f"aw... nothing done today? you should lock in :c\n\n *streak: {new_streak} days*"
+
+    client.chat_postMessage(channel=CHANNEL_ID, text = text)
+    save_streak_data({"streak": new_streak, "last_date": today_streak})
+    print(f"posted summary, streak = {new_streak}")
+
+def seconds_until_next_post(hour, minute):
     now = datetime.datetime.now()
-    target = now.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += datetime.timedelta(days=1)
     return (target - now).total_seconds()
 
-def scheduler_loop(client):
+def todo_scheduler_loop(client):
     while True:
-        wait_seconds = seconds_until_next_post()
+        wait_seconds = seconds_until_next_post(POST_HOUR, POST_MINUTE)
         print(f"next to-do post in {int(wait_seconds)} seconds")
         time.sleep(wait_seconds)
         post_todo_summary(client)
 
+def night_scheduler_loop(client):
+    while True:
+        wait_seconds = seconds_until_next_post(NIGHT_HOUR, NIGHT_MINUTE)
+        print(f"next summary in {int(wait_seconds)} seconds")
+        time.sleep(wait_seconds)
+        post_night_summary(client)
+
+
 if __name__ == "__main__":
     print("bot is running!")
     post_todo_summary(app.client) 
-    threading.Thread(target=scheduler_loop, args=(app.client,), daemon=True).start()
+    threading.Thread(target=todo_scheduler_loop, args=(app.client,), daemon=True).start()
+    threading.Thread(target=night_scheduler_loop, args=(app.client,), daemon=True).start()
     SocketModeHandler(app, os.getenv("SLACK_APP_TOKEN")).start()
